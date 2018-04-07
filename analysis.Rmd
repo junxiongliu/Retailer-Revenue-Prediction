@@ -1,0 +1,564 @@
+---
+title: "Data Mining Homework 1"
+author: "Xiaowei Li, Junxiong Liu, Hao Xiao, Tong Yin"
+date: '`r format(Sys.time(), "%B %d, %Y")`'
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(collapse=TRUE, prompt=TRUE, eval=TRUE, message=F, include=T,comment=NULL,fig.width = 5, warnings = FALSE, fig.height = 3,tidy.opts=list(width.cutoff=50),tidy=TRUE)
+```
+
+```{r packageCheck, include=FALSE}
+mypacks <- c("ggplot2","stringr","dplyr","knitr","lubridate","car","tidyr","cvTools")  # what packages are needed?
+packs <- installed.packages()   # find installed package list
+install.me <- mypacks[!(mypacks %in% packs[,"Package"])]  #what needs to be installed?
+if (length(install.me) >= 1) install.packages(install.me, repos = "http://cran.us.r-project.org")   # install (if needed)
+lapply(mypacks, library, character.only=TRUE)  # load all packages
+```
+
+# Read data
+```{r}
+booktrain <- read.csv("bookdata/booktrain.csv")
+orders <- read.csv("bookdata/orders.csv")
+```
+
+# Explore and Clean
+
+## split to train and test
+```{r}
+orders_customer_unique <- orders$id %>% unique() 
+
+is_in <- booktrain$id[which(booktrain$id %in% orders_customer_unique)]
+
+orders_train <- orders %>% filter(id %in% is_in)
+
+orders_testing <- anti_join(orders,orders_train)
+```
+
+## filter out qty = 0 from train
+```{r}
+train_cleaned <- orders_train %>% filter(qty != 0)
+```
+
+## only 0 order from train
+```{r}
+# order number = 0
+temp <- train_cleaned %>% filter(price == 0) 
+
+temp2 <- train_cleaned %>% filter(ordnum %in% temp$ordnum) %>% arrange(ordnum)
+
+# only 0 dollar order
+only_zero_order <- temp2 %>% 
+  group_by(ordnum) %>% summarise(sum_price = sum(price)) %>% 
+  filter(sum_price == 0) # 619 out of 4536 orders (that has order of 0) have price only = 0
+
+# filter out only 0 dollar order
+train_cleaned <- train_cleaned %>% 
+  filter(!ordnum %in% only_zero_order$ordnum)
+
+```
+
+## join booktrain and orders_cleaned_training
+```{r}
+train_temp <- left_join(train_cleaned, booktrain, by = "id")
+test_temp <- orders_testing
+booktrain_cleaned <- booktrain %>% filter(id %in% is_in)
+
+rm(booktrain,only_zero_order,orders,orders_train,orders_testing,packs,temp,temp2,train_cleaned)
+```
+
+**Phase 1:**
+ordhist: total number of orders
+salhist: total number of sales (prices)
+totalqty: total quantity
+catdiversity: number of categories a person purchased
+recency: number of days between last purchase and Aug 01, 2014
+tof: number of days between first purchase and Aug 01, 2014
+_________________
+**Phase 2:**
+consistency: standard deviation of yearly order number
+category: ... to be done
+more time variables: consider time series (maybe sales/qty each year)
+interaction: ... to be done
+
+## train_temp cleaning
+```{r}
+# create wide form of id category qty price
+temp0 <- train_temp %>% 
+  select(id,category,qty,price)
+
+temp0_qty <- temp0 %>%
+  mutate(category = str_c("qty",category)) %>%
+  select(-price) %>% 
+  group_by(id,category) %>%
+  summarise(qty=sum(qty)) %>%
+  spread(category,qty,fill = 0)
+
+temp0_sals <- temp0 %>%
+  mutate(category = str_c("sal",category)) %>%
+  select(-qty) %>% 
+  group_by(id,category) %>%
+  summarise(salhist=sum(price)) %>%
+  spread(category,salhist,fill = 0)
+
+# for ordhist
+temp1 <- train_temp %>%
+  group_by(id) %>% 
+  summarise(ordhist = n())
+
+# for catdiversity
+temp2 <- train_temp %>% 
+  group_by(id,category) %>%
+  summarise(n=n()) %>%
+  ungroup() %>%
+  group_by(id) %>%
+  summarise(catdiversity = n())
+
+# for recency and tof
+train_temp$orddate <- sub("DEC","/12/",train_temp$orddate)
+train_temp$orddate <- sub("NOV","/11/",train_temp$orddate)
+train_temp$orddate <- sub("OCT","/10/",train_temp$orddate)
+train_temp$orddate <- sub("SEP","/09/",train_temp$orddate)
+train_temp$orddate <- sub("AUG","/08/",train_temp$orddate)
+train_temp$orddate <- sub("JUL","/07/",train_temp$orddate)
+train_temp$orddate <- sub("JUN","/06/",train_temp$orddate)
+train_temp$orddate <- sub("MAY","/05/",train_temp$orddate)
+train_temp$orddate <- sub("APR","/04/",train_temp$orddate)
+train_temp$orddate <- sub("MAR","/03/",train_temp$orddate)
+train_temp$orddate <- sub("FEB","/02/",train_temp$orddate)
+train_temp$orddate <- sub("JAN","/01/",train_temp$orddate)
+
+train_temp$orderdate_new <- as.Date(train_temp$orddate,"%d/%m/%Y")
+
+enddate <- as.Date("01/08/2014","%d/%m/%Y")
+
+train_temp$recency <- enddate-train_temp$orderdate_new
+
+temp3 <- train_temp %>% group_by(id) %>% 
+  summarise(recency=min(recency))
+temp4 <- train_temp %>% group_by(id) %>% 
+  summarise(tof=max(recency))
+
+# for qty/sales previous 6 months (can have more)
+specific_time_fun <- function(data,a,b,name){
+  temp <- data %>%
+    mutate(specified_time = ifelse(recency >= a & recency < b, 1, 0)) %>%
+    select(id,qty,price,specified_time)
+
+  temp_cur <- temp %>% filter(specified_time == 1) %>%
+    group_by(id) %>% summarise(qty = sum(qty),
+                             sals = sum(price))  
+ 
+  colnames(temp_cur) <- c("id",str_c(name,"_qty"),str_c(name,"_sals"))
+  
+  temp_cur
+}
+
+temp5_lmonth <- specific_time_fun(train_temp,0,30,"lmonth")
+temp5_twomonthago <- specific_time_fun(train_temp,31,60,"twomonthago")
+temp5_threemonthago <- specific_time_fun(train_temp,61,90,"threemonthago")
+temp5_firsthalfyear <- specific_time_fun(train_temp,91,180,"firsthalfyearago")
+temp5_secondhalfyear <- specific_time_fun(train_temp,181,365,"secondhalfyearago")
+temp5_twoyearsago <- specific_time_fun(train_temp,366,730,"twoyearsago")
+temp5_threeyearsago <- specific_time_fun(train_temp,731,1095,"threeyearsago")
+temp5_morethanthreeago <- specific_time_fun(train_temp,1096,500000,"morethanthreeago")
+
+
+# train_cleaned
+train_cleaned <- inner_join(temp1,temp2)
+train_cleaned <- left_join(train_cleaned,booktrain_cleaned) 
+train_cleaned <- left_join(train_cleaned,temp3)
+train_cleaned <- left_join(train_cleaned,temp4)
+train_cleaned <- left_join(train_cleaned,temp5_lmonth)
+
+train_cleaned <- left_join(train_cleaned,temp5_lmonth)
+train_cleaned <- left_join(train_cleaned,temp5_twomonthago)
+train_cleaned <- left_join(train_cleaned,temp5_threemonthago)
+train_cleaned <- left_join(train_cleaned,temp5_firsthalfyear)
+train_cleaned <- left_join(train_cleaned,temp5_secondhalfyear)
+train_cleaned <- left_join(train_cleaned,temp5_twoyearsago)
+train_cleaned <- left_join(train_cleaned,temp5_threeyearsago)
+train_cleaned <- left_join(train_cleaned,temp5_morethanthreeago)
+
+train_cleaned[is.na(train_cleaned)] <- 0
+
+train_cleaned <- train_cleaned %>%
+  select(id,logtarg,ordhist,catdiversity,recency,tof,lmonth_qty,lmonth_sals,
+         twomonthago_qty,twomonthago_sals,threemonthago_qty,threemonthago_sals,
+         firsthalfyearago_qty,firsthalfyearago_sals,secondhalfyearago_qty,
+         secondhalfyearago_sals,twoyearsago_qty,twoyearsago_sals,threeyearsago_qty,
+         threeyearsago_sals,morethanthreeago_qty,morethanthreeago_sals)
+
+# all 60 columns
+sixty_cols <- inner_join(temp0_qty,temp0_sals)
+
+# conduct pca
+pca_model <- prcomp(sixty_cols %>% select(-id))
+pca_60 <- data.frame(pca_model$x) %>% 
+  select(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10) %>% mutate(id = sixty_cols$id)
+
+# join back pca 60
+train_cleaned <- inner_join(train_cleaned,pca_60)
+
+rm(temp0,temp0_qty,temp0_sals,temp1,temp2,temp3,temp4,sixty_cols,pca_60,
+   temp5_lmonth,temp5_twomonthago,temp5_threemonthago,temp5_firsthalfyear,
+   temp5_secondhalfyear,temp5_twoyearsago,temp5_threeyearsago,
+   temp5_morethanthreeago)
+```
+
+## test cleaning
+```{r}
+# create wide form of id category qty price
+temp0 <- test_temp %>% 
+  select(id,category,qty,price)
+
+temp0_qty <- temp0 %>%
+  mutate(category = str_c("qty",category)) %>%
+  select(-price) %>% 
+  group_by(id,category) %>%
+  summarise(qty=sum(qty)) %>%
+  spread(category,qty,fill = 0)
+
+temp0_sals <- temp0 %>%
+  mutate(category = str_c("sal",category)) %>%
+  select(-qty) %>% 
+  group_by(id,category) %>%
+  summarise(salhist=sum(price)) %>%
+  spread(category,salhist,fill = 0)
+
+# for ordhist
+temp1 <- test_temp %>%
+  group_by(id) %>% 
+  summarise(ordhist = n())
+
+# for catdiversity
+temp2 <- test_temp %>% 
+  group_by(id,category) %>%
+  summarise(n=n()) %>%
+  ungroup() %>%
+  group_by(id) %>%
+  summarise(catdiversity = n())
+
+# for recency and tof
+test_temp$orddate <- sub("DEC","/12/",test_temp$orddate)
+test_temp$orddate <- sub("NOV","/11/",test_temp$orddate)
+test_temp$orddate <- sub("OCT","/10/",test_temp$orddate)
+test_temp$orddate <- sub("SEP","/09/",test_temp$orddate)
+test_temp$orddate <- sub("AUG","/08/",test_temp$orddate)
+test_temp$orddate <- sub("JUL","/07/",test_temp$orddate)
+test_temp$orddate <- sub("JUN","/06/",test_temp$orddate)
+test_temp$orddate <- sub("MAY","/05/",test_temp$orddate)
+test_temp$orddate <- sub("APR","/04/",test_temp$orddate)
+test_temp$orddate <- sub("MAR","/03/",test_temp$orddate)
+test_temp$orddate <- sub("FEB","/02/",test_temp$orddate)
+test_temp$orddate <- sub("JAN","/01/",test_temp$orddate)
+
+test_temp$orderdate_new <- as.Date(test_temp$orddate,"%d/%m/%Y")
+
+enddate <- as.Date("01/08/2014","%d/%m/%Y")
+
+test_temp$recency <- enddate-test_temp$orderdate_new
+
+temp3 <- test_temp %>% group_by(id) %>% 
+  summarise(recency=min(recency))
+temp4 <- test_temp %>% group_by(id) %>% 
+  summarise(tof=max(recency))
+
+temp5_lmonth <- specific_time_fun(test_temp,0,30,"lmonth")
+temp5_twomonthago <- specific_time_fun(test_temp,31,60,"twomonthago")
+temp5_threemonthago <- specific_time_fun(test_temp,61,90,"threemonthago")
+temp5_firsthalfyear <- specific_time_fun(test_temp,91,180,"firsthalfyearago")
+temp5_secondhalfyear <- specific_time_fun(test_temp,181,365,"secondhalfyearago")
+temp5_twoyearsago <- specific_time_fun(test_temp,366,730,"twoyearsago")
+temp5_threeyearsago <- specific_time_fun(test_temp,731,1095,"threeyearsago")
+temp5_morethanthreeago <- specific_time_fun(test_temp,1096,500000,"morethanthreeago")
+
+# test_cleaned
+test_cleaned <- inner_join(temp1,temp2)
+test_cleaned <- left_join(test_cleaned,temp3)
+test_cleaned <- left_join(test_cleaned,temp4)
+
+test_cleaned <- left_join(test_cleaned,temp5_lmonth)
+test_cleaned <- left_join(test_cleaned,temp5_twomonthago)
+test_cleaned <- left_join(test_cleaned,temp5_threemonthago)
+test_cleaned <- left_join(test_cleaned,temp5_firsthalfyear)
+test_cleaned <- left_join(test_cleaned,temp5_secondhalfyear)
+test_cleaned <- left_join(test_cleaned,temp5_twoyearsago)
+test_cleaned <- left_join(test_cleaned,temp5_threeyearsago)
+test_cleaned <- left_join(test_cleaned,temp5_morethanthreeago)
+
+test_cleaned[is.na(test_cleaned)] <- 0
+
+test_cleaned <- test_cleaned %>%
+  select(id,ordhist,catdiversity,recency,tof,lmonth_qty,lmonth_sals,
+         twomonthago_qty,twomonthago_sals,threemonthago_qty,threemonthago_sals,
+         firsthalfyearago_qty,firsthalfyearago_sals,secondhalfyearago_qty,
+         secondhalfyearago_sals,twoyearsago_qty,twoyearsago_sals,threeyearsago_qty,
+         threeyearsago_sals,morethanthreeago_qty,morethanthreeago_sals)
+
+# all 60 columns
+sixty_cols <- inner_join(temp0_qty,temp0_sals)
+
+# conduct pca
+pca_60 <- data.frame(predict(pca_model,newdata=sixty_cols)) %>% 
+  select(PC1,PC2,PC3,PC4,PC5,PC6,PC7,PC8,PC9,PC10) %>% mutate(id = sixty_cols$id)
+
+# join back pca 60
+test_cleaned <- inner_join(test_cleaned,pca_60)
+
+# all 60 columns
+# test_cleaned <- inner_join(test_cleaned,temp0_qty)
+# test_cleaned <- inner_join(test_cleaned,temp0_sals)
+
+rm(temp0,temp0_qty,temp0_sals,temp1,temp2,temp3,temp4,temp5_lmonth,temp5_twomonthago,temp5_threemonthago,temp5_firsthalfyear,temp5_secondhalfyear,temp5_twoyearsago,temp5_threeyearsago,temp5_morethanthreeago)
+```
+
+
+## linear regression
+```{r}
+# current
+# train_cleaned <- train_cleaned %>% filter(id %in% train_id_bigger_than_0$id)
+train <- train_cleaned %>% select(-id)
+
+lm1 <- lm(logtarg~.,data=train)
+#lm1 <- lm(logtarg~ordhist+catdiversity+recency+tof+lmonth_qty+lmonth_sals+twomonthago_qty+twomonthago_sals+threemonthago_qty+threemonthago_sals,data=train)
+summary(lm1)
+vif(lm1)
+
+# lm11 <- update(lm1, . ~ . -ordhist)
+# summary(lm11)
+
+# stepwise var selection (current model..without pca!)
+lm2 <- step(lm1, direction = "both")
+summary(lm2)
+vif(lm2)
+
+# lm3 do some log stuff for sales
+lm3 <- lm(logtarg ~ catdiversity + tof + log(lmonth_sals + 0.01) + twomonthago_qty + log(threemonthago_sals+0.01) + firsthalfyearago_qty + morethanthreeago_qty + PC3 + PC5 + PC9 + PC10, data = train_cleaned)
+summary(lm3)
+vif(lm3)
+```
+
+## cv (use 20 seeds)
+```{r}
+seed_vector <- c(1:5,7:12,666,888,6666,6,66,68,270,605,2135)
+
+rmse_func <- function(model){
+  rmse <- c()
+  
+  for (each in seed_vector){
+    set.seed(each)
+    cur <- cvFit(model,data=train,y=train$logtarg,K=10)$cv
+    rmse <- c(rmse,cur)
+  }
+  
+  rmse
+}
+
+cur_model_cv <- rmse_func(lm3)
+
+
+print ("-------------------------------------------")
+
+# cv of the previous submitted best version in kaggle
+# only last month, two month ago, three months ago, no pca, with variable selection
+submitted_model_cv <- c(0.6143628,0.6149454,0.6148192,0.6146034,0.6152695,0.6155507,0.6144272,0.6151366,0.6145927,0.6147782,0.6150303,0.6149047,0.6150470,0.6149642,0.6151794,0.6148936,0.6157773,0.6148358,0.6148158,0.6154038)
+
+# cv of the current best model (in cv)
+# pca10, last month, two ago, three ago, six ago, twelve ago, 24, 36, and afterwards, with variable selection
+best_cv_model_cv <- c(0.6139448,0.6144274,0.6143225,0.6138050,0.6146704,0.6149043,0.6144189,0.6145641,0.6143788,0.6142928,0.6143957,0.6147076,0.6145283,0.6144480,0.6144461,0.6144891,0.6159222,0.6137562,0.6139688,0.6146600)
+
+# compare cur_model_cv vs submitted_model_cv 
+# if >= 10, the current model is better than previous submitted model
+sum(cur_model_cv < submitted_model_cv)
+print ("----------------------------------------")
+cur_model_cv
+cur_model_cv - submitted_model_cv
+sum(cur_model_cv - submitted_model_cv)/20
+
+# compare cur_model_cv vs best_cv_model_cv 
+# if >= 10, the current model is better than best model
+sum(cur_model_cv < best_cv_model_cv)
+print ("----------------------------------------")
+best_cv_model_cv
+cur_model_cv - best_cv_model_cv
+sum(cur_model_cv - best_cv_model_cv)/20
+```
+
+## outlier check (maybe danger zone)
+```{r}
+# cook (x and y space)
+all_cook <- cooks.distance(lm1)
+cutoff_Cook <- 4/(nrow(train)-30-1)
+index_cook <- which(all_cook > cutoff_Cook)
+data_high_cook <- train[index_cook,]
+
+# leverage (only x space): use 4* instead of 2*
+cutoff_leverage <- 4*(30+1)/nrow(train)
+index_leverage <- which(hatvalues((lm1)) > cutoff_leverage)
+data_high_leverage <- train[index_leverage,]
+
+# both high leverage and high cook
+index_both <- index_cook[index_cook %in% index_leverage]
+outliers <- train[index_both,]
+
+# remove some index..
+#both high leverage and high cook
+train_2 <- train[-index_both,]
+```
+
+## model again with outlier removed
+```{r}
+lm12 <- lm(logtarg~.,data=train_2)
+summary(lm12)
+vif(lm12)
+
+# stepwise var selection (current model..without pca!)
+lm22 <- step(lm12, direction = "both")
+summary(lm22)
+vif(lm22)
+
+# not sure if this will further improve
+lm221 <- update(lm22, . ~ . -threemonthago_sals)
+summary(lm221)
+vif(lm221)
+```
+
+## cv if using outlier removal (use 20 seeds)
+```{r}
+seed_vector <- c(1:5,7:12,666,888,6666,6,66,68,270,605,2135)
+
+cur_model_cv_2 <- rmse_func(lm221)
+
+print ("-------------------------------------------")
+
+# cv of the previous submitted best version in kaggle (with outlier removed)
+# only last month, two month ago, three months ago, no pca, with variable selection
+submitted_model_cv_2 <- c(0.6137881,0.6140245,0.6141576,0.6138018,0.6142630,0.6143612,0.6135468,0.6138437,0.6140445,0.6140124,0.6139053,0.6140373,0.614173,0.6140619,0.6137886,0.6139622,0.6157831,0.6137227,0.6136941,0.6142300)
+
+# cv of the current best model (in cv)
+# pca10, last month, two ago, three ago, six ago, twelve ago, 24, 36, and afterwards, with variable selection
+best_cv_model_cv_2 <- c(0.6137881,0.6140245,0.6141576,0.6138018,0.6142630,0.6143612,0.6135468,0.6138437,0.6140445,0.6140124,0.6139053,0.6140373,0.614173,0.6140619,0.6137886,0.6139622,0.6157831,0.6137227,0.6136941,0.6142300)
+
+# compare cur_model_cv vs submitted_model_cv 
+# if >= 10, the current model is better than previous submitted model
+sum(cur_model_cv_2 < submitted_model_cv_2)
+print ("----------------------------------------")
+cur_model_cv_2
+cur_model_cv_2 - submitted_model_cv_2
+sum(cur_model_cv_2 - submitted_model_cv_2)/20
+
+# compare cur_model_cv vs best_cv_model_cv 
+# if >= 10, the current model is better than best model
+sum(cur_model_cv_2 < best_cv_model_cv_2)
+print ("----------------------------------------")
+best_cv_model_cv_2
+cur_model_cv_2 - best_cv_model_cv_2
+sum(cur_model_cv_2 - best_cv_model_cv_2)/20
+```
+
+
+
+## output
+```{r}
+test_predicted <- test_cleaned %>% 
+  mutate(logtarg_pred = predict(lm221,newdata = test_cleaned))
+
+# currently change all - to 0
+test_predicted2 <- test_predicted %>% 
+  mutate(logtarg_pred = ifelse(logtarg_pred < 0, 0, logtarg_pred),
+         yhat = logtarg_pred) %>%
+  select(id,yhat)
+
+write.csv(test_predicted2,"out.csv",row.names = FALSE)
+```
+
+
+
+
+## Previous code
+```{r}
+# try log sales
+lm3 <- lm(logtarg ~ ordhist + catdiversity + recency + tof + lmonth_qty + log(lmonth_sals + 1) + twomonthago_qty + log(twomonthago_sals + 1) + threemonthago_qty + 
+            log(threemonthago_sals + 1),data = train)
+summary(lm3)
+
+
+# set seed
+set.seed(2135)
+rmse <- cvFit(lm2,data=train,y=train$logtarg,K=10)
+rmse
+
+
+# check avg price/qty of each category
+EDA_df1 <- train_temp %>% 
+  mutate(priceper1 = price/qty) %>%
+  group_by(category) %>% summarise(avgcatprice = sum(priceper1)/n()) %>%
+  arrange(desc(avgcatprice))
+## category 17 notice!
+
+# check which category produce most targdol
+EDA_df2 <- train_temp %>% 
+  group_by(category) %>% summarise(avglogtarg = sum(logtarg)/n()) %>%
+  arrange(desc(avglogtarg))
+## category 39 notice!!
+
+
+## first logistic, then use logtarg > 0 to do linear
+train_logit <- train_cleaned %>% 
+  mutate(y = ifelse(logtarg > 0, 1, 0)) 
+logit1 <- glm(y~.,family = binomial(link = logit),
+              data = subset(train_logit, select = c(-id,-logtarg)))
+summary(logit1)
+
+logit2 <- step(logit1,direction = "both")
+summary(logit2)
+
+train_logit <- train_logit %>%
+  mutate(pred_prob = predict(logit2,newdata = train_logit,type = "response")) %>%
+  select(id,pred_prob) 
+
+# train_logit <- train_logit %>% mutate(predict_yes = ifelse(pred_prob >= 0.02, 1, 0))
+
+# train_id_bigger_than_0 <- train_logit %>% filter(predict_yes == 1)
+
+ccr <- c()
+recall <- c()
+f <- c()
+for(i in 1:200){
+  cutoff <- 1/500*i
+  cmatrix <- table(train_logit$pred_prob>cutoff,train_cleaned$logtarg>0)
+  
+# ccr <- c(ccr,sum(diag(cmatrix))/sum(cmatrix))
+  
+  recall <- cmatrix[2,2]/sum(cmatrix[,2])
+  precision <- cmatrix[2,2]/sum(cmatrix[2,])
+  f <- c(f,2 * recall * precision / (recall + precision))
+}
+
+i <- 1:200
+i[ccr == max(ccr)]*1/500
+max(ccr)
+
+i[recall == max(recall)]*1/500
+max(recall)
+
+i[f == max(f)]*1/500
+max(f)
+
+# pick i = 0.350
+cmatrix <- table(train_logit$pred_prob>0.056,train_cleaned$logtarg>0)
+cmatrix
+# i_opt <- 
+
+# for purchasing at least one category 17 or category 39: create new variable
+cat17_id <- train_temp %>% filter(category == 17)
+cat39_id <- train_temp %>% filter(category == 39)
+temp2 <- temp2 %>% 
+  mutate(cat17 = ifelse(id %in% cat17_id$id, 1, 0),
+         cat39 = ifelse(id %in% cat39_id$id, 1, 0))
+```
+
